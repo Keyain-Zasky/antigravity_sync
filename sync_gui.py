@@ -12,7 +12,7 @@ from tkinter import ttk, messagebox, filedialog
 
 # Optional dependencies for system tray
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageTk
     import pystray
     TRAY_AVAILABLE = True
 except ImportError:
@@ -376,6 +376,29 @@ class AntigravitySyncApp:
                   selectforeground=[("readonly", "#e1e1e6")],
                   foreground=[("readonly", "#e1e1e6")])
 
+        # Configure scrollbar colors and shapes to be dark and modern
+        style.configure("TScrollbar", 
+                        gripcount=0,
+                        background="#1a1a1e", 
+                        troughcolor="#121214", 
+                        bordercolor="#29292e", 
+                        lightcolor="#1a1a1e", 
+                        darkcolor="#1a1a1e", 
+                        arrowcolor="#8257e5",
+                        arrowsize=10, 
+                        width=12)
+        style.map("TScrollbar",
+                  background=[("active", "#29292e"), ("pressed", "#8257e5")])
+
+        # Load Window Icon
+        icon_path = self.script_dir / "icon.png"
+        if icon_path.exists():
+            try:
+                self.icon_img = ImageTk.PhotoImage(Image.open(icon_path))
+                self.root.iconphoto(False, self.icon_img)
+            except Exception as e:
+                self.log(f"Error setting window icon: {e}")
+
         # Main Layout Frame
         main_frame = tk.Frame(self.root, bg="#121214", padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -526,10 +549,21 @@ class AntigravitySyncApp:
         messagebox.showinfo("Success", "Settings saved successfully.")
 
     def setup_tray(self):
-        # Create dynamic tray image
-        image = Image.new("RGB", (64, 64), color=(0, 128, 255))
-        draw = ImageDraw.Draw(image)
-        draw.ellipse([8, 8, 56, 56], fill=(0, 200, 100))
+        # Load user's custom icon if available
+        icon_path = self.script_dir / "icon.png"
+        image = None
+        if icon_path.exists():
+            try:
+                # Open, resize to standard tray icon size and convert
+                image = Image.open(icon_path).resize((64, 64), Image.Resampling.LANCZOS)
+            except Exception as e:
+                self.log(f"Error loading tray icon image: {e}")
+                
+        if image is None:
+            # Fallback dynamic tray image
+            image = Image.new("RGB", (64, 64), color=(0, 128, 255))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse([8, 8, 56, 56], fill=(0, 200, 100))
         
         # Tray Menu
         menu = pystray.Menu(
