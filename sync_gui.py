@@ -410,6 +410,42 @@ class AntigravitySyncApp:
         except Exception as e:
             self.log(f"Git operation error: {e}")
 
+    def copy_incremental(self, src, dst):
+        """Copies files incrementally from src to dst. Overwrites only if newer/different. Does not block on locks."""
+        if not src.exists():
+            return
+        dst.mkdir(parents=True, exist_ok=True)
+        
+        src_names = set()
+        try:
+            for item in src.iterdir():
+                src_names.add(item.name)
+                dst_item = dst / item.name
+                if item.is_dir():
+                    self.copy_incremental(item, dst_item)
+                else:
+                    try:
+                        if not dst_item.exists() or item.stat().st_mtime != dst_item.stat().st_mtime or item.stat().st_size != dst_item.stat().st_size:
+                            shutil.copy2(item, dst_item)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.log(f"Error reading source folder {src}: {e}")
+            
+        try:
+            if dst.exists():
+                for item in dst.iterdir():
+                    if item.name not in src_names:
+                        try:
+                            if item.is_dir():
+                                shutil.rmtree(item)
+                            else:
+                                item.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     def run_google_drive_sync(self, direction="backup"):
         gdrive_path_str = self.config.get("google_drive_path", "")
         if not gdrive_path_str:
@@ -425,21 +461,15 @@ class AntigravitySyncApp:
                 return
                 
         try:
+            target_folder = gdrive_path / "backup_data"
             if direction == "backup":
-                self.log(f"Copying backup to Google Drive: {gdrive_path}")
-                # Simple recursive folder copy
-                target_folder = gdrive_path / "backup_data"
-                if target_folder.exists():
-                    shutil.rmtree(target_folder)
-                shutil.copytree(self.backup_dir, target_folder)
+                self.log(f"Copying backup to Google Drive (incremental): {gdrive_path}")
+                self.copy_incremental(self.backup_dir, target_folder)
                 self.log("Google Drive backup completed.")
             else:
-                self.log(f"Restoring backup from Google Drive: {gdrive_path}")
-                src_folder = gdrive_path / "backup_data"
-                if src_folder.exists():
-                    if self.backup_dir.exists():
-                        shutil.rmtree(self.backup_dir)
-                    shutil.copytree(src_folder, self.backup_dir)
+                self.log(f"Restoring backup from Google Drive (incremental): {gdrive_path}")
+                if target_folder.exists():
+                    self.copy_incremental(target_folder, self.backup_dir)
                     self.log("Google Drive restore to local workspace folder completed.")
                 else:
                     self.log("No backup folder found on Google Drive to restore.")
