@@ -6,9 +6,15 @@ import shutil
 import platform
 import subprocess
 import threading
+import urllib.request
+import zipfile
+import tempfile
+import ssl
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+CURRENT_VERSION = "v1.0.5"
 
 # Optional dependencies for system tray
 try:
@@ -56,6 +62,9 @@ class AntigravitySyncApp:
         # Daemon state variables
         self.last_mtime = 0.0
         self.active_cooldown_start = None
+        
+        # Check for updates from GitHub in background
+        threading.Thread(target=self.check_and_apply_updates, daemon=True).start()
         
         # Start Daemon Thread
         self.daemon_thread = threading.Thread(target=self.run_daemon, daemon=True)
@@ -410,6 +419,100 @@ class AntigravitySyncApp:
         except Exception as e:
             self.log(f"Git operation error: {e}")
 
+    def check_and_apply_updates(self):
+        self.log("Checking for updates from GitHub...")
+        owner = "Keyain-Zasky"
+        repo = "antigravity_sync"
+        url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Antigravity-Sync-Updater",
+                "Accept": "application/vnd.github+json"
+            }
+        )
+        
+        try:
+            context = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, context=context) as res:
+                release_info = json.loads(res.read().decode("utf-8"))
+            
+            tag_name = release_info.get("tag_name", "")
+            if not tag_name:
+                self.log("No version tag found in latest release.")
+                return
+                
+            def parse_ver(v):
+                try:
+                    return [int(x) for x in v.lstrip("v").split(".")]
+                except Exception:
+                    return [0, 0, 0]
+            
+            if parse_ver(tag_name) > parse_ver(CURRENT_VERSION):
+                self.log(f"New update found: {tag_name} (Current: {CURRENT_VERSION}). Downloading...")
+                
+                zipball_url = release_info.get("zipball_url")
+                if not zipball_url:
+                    zipball_url = f"https://github.com/Keyain-Zasky/antigravity_sync/archive/refs/tags/{tag_name}.zip"
+                    
+                zip_req = urllib.request.Request(zipball_url, headers={"User-Agent": "Antigravity-Sync-Updater"})
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_file:
+                    with urllib.request.urlopen(zip_req, context=context) as zip_res:
+                        tmp_file.write(zip_res.read())
+                    tmp_zip_path = Path(tmp_file.name)
+                
+                self.log("Update package downloaded. Installing...")
+                
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    with zipfile.ZipFile(tmp_zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(tmp_dir)
+                    
+                    try:
+                        tmp_zip_path.unlink()
+                    except Exception:
+                        pass
+                    
+                    extracted_root = Path(tmp_dir)
+                    subdirs = [x for x in extracted_root.iterdir() if x.is_dir()]
+                    if not subdirs:
+                        self.log("Error: Extracted release directory is empty.")
+                        return
+                    
+                    source_dir = subdirs[0]
+                    
+                    self.log(f"Overwriting local files in {self.script_dir}...")
+                    for item in source_dir.rglob("*"):
+                        if item.is_file():
+                            relative_path = item.relative_to(source_dir)
+                            if "sync_config.json" in str(relative_path) or ".git/" in str(relative_path).replace("\\", "/"):
+                                continue
+                            
+                            dest_file = self.script_dir / relative_path
+                            dest_file.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            try:
+                                shutil.copy2(item, dest_file)
+                            except Exception as e:
+                                self.log(f"Error copying update file {relative_path}: {e}")
+                
+                self.log("Auto-update file overwrite completed. Running install.py...")
+                install_script = self.script_dir / "install.py"
+                if install_script.exists():
+                    try:
+                        subprocess.run([sys.executable, str(install_script), "--headless"], check=False)
+                    except Exception as e:
+                        self.log(f"Error running install.py: {e}")
+                
+                self.log("Restarting application to apply updates...")
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:])
+                self.exit_app()
+            else:
+                self.log(f"Antigravity Sync is up to date (Version: {CURRENT_VERSION}).")
+        except Exception as e:
+            self.log(f"Update check failed: {e}")
+
     def copy_incremental(self, src, dst):
         """Copies files incrementally from src to dst. Overwrites only if newer/different. Does not block on locks."""
         if not src.exists():
@@ -735,7 +838,7 @@ class AntigravitySyncApp:
         footer_frame = tk.Frame(main_frame, bg="#121214")
         footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(5, 0))
         
-        version_label = tk.Label(footer_frame, text="v1.0.4", bg="#121214", fg="#575760", font=("Segoe UI", 9))
+        version_label = tk.Label(footer_frame, text=CURRENT_VERSION, bg="#121214", fg="#575760", font=("Segoe UI", 9))
         version_label.pack(side=tk.RIGHT)
 
         # Window closing handler
@@ -804,8 +907,15 @@ class AntigravitySyncApp:
     def exit_app(self):
         self.is_monitoring = False
         if TRAY_AVAILABLE and hasattr(self, "tray_icon"):
-            self.tray_icon.stop()
-        self.root.destroy()
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+        if hasattr(self, "root"):
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
         sys.exit(0)
 
 if __name__ == "__main__":
