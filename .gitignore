@@ -1,0 +1,9 @@
+# Antigravity Sync ignore list
+oauth_creds.json
+installation_id
+tmp/
+*.log
+__pycache__/
+*.pyc
+sync_config.json
+backup_data/
