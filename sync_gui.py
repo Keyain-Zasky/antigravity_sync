@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.1.0"
+CURRENT_VERSION = "v1.1.1"
 
 # Optional dependencies for system tray
 try:
@@ -277,7 +277,7 @@ class AntigravitySyncApp:
                         touched = self.get_touched_files()
                         for p_file in touched:
                             for path_str in projects.keys():
-                                if not self.is_safe_project_path(path_str):
+                                if not self.is_safe_project_path(path_str, log_skip=False):
                                     continue
                                 try:
                                     proj_path = Path(path_str).resolve()
@@ -318,17 +318,19 @@ class AntigravitySyncApp:
                 self.copied_files = getattr(self, "copied_files", 0) + 1
                 self.update_sync_percentage("Local")
 
-    def is_safe_project_path(self, path_str):
+    def is_safe_project_path(self, path_str, log_skip=True):
         try:
             p = Path(path_str).resolve()
             home = Path.home().resolve()
             if not p.exists():
                 return False
             if p == home:
-                self.log(f"Skipping project path because it is the home directory: {path_str}")
+                if log_skip:
+                    self.log(f"Skipping project path because it is the home directory: {path_str}")
                 return False
             if p in home.parents or len(p.parts) <= 2:
-                self.log(f"Skipping project path because it is a system root or parent of home: {path_str}")
+                if log_skip:
+                    self.log(f"Skipping project path because it is a system root or parent of home: {path_str}")
                 return False
                 
             path_lower = str(p).lower()
@@ -337,7 +339,8 @@ class AntigravitySyncApp:
             ]
             for kw in unsafe_keywords:
                 if kw in path_lower:
-                    self.log(f"Skipping project path because it matches unsafe/installation keywords: {path_str}")
+                    if log_skip:
+                        self.log(f"Skipping project path because it matches unsafe/installation keywords: {path_str}")
                     return False
             return True
         except Exception as e:
