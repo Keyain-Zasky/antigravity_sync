@@ -35,6 +35,15 @@ class AntigravitySyncApp:
         self.backup_dir = self.script_dir / "backup_data"
         self.backup_dir.mkdir(exist_ok=True)
         
+        # Prevent Windows taskbar from grouping python app with python.exe default icon
+        if platform.system().lower() == "windows":
+            try:
+                import ctypes
+                myappid = "com.antigravity.sync.daemon.v1"
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
+
         self.status = "Idle"
         self.last_sync_time = "Never"
         self.is_monitoring = True
