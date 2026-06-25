@@ -731,6 +731,13 @@ class AntigravitySyncApp:
             self.log_text.insert(tk.END, log + "\n")
         self.log_text.config(state="disabled")
         
+        # Footer version label in bottom right
+        footer_frame = tk.Frame(main_frame, bg="#121214")
+        footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(5, 0))
+        
+        version_label = tk.Label(footer_frame, text="v1.0.4", bg="#121214", fg="#575760", font=("Segoe UI", 9))
+        version_label.pack(side=tk.RIGHT)
+
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
