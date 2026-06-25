@@ -64,11 +64,43 @@ class SyncInstaller:
         
         print("Installation completed successfully!")
 
+    def get_system_python(self, prefer_w=False):
+        """Finds the real Python interpreter in the system PATH when running in frozen mode."""
+        if not getattr(sys, 'frozen', False):
+            if prefer_w and self.os_type == "windows":
+                python_w = Path(sys.executable).parent / "pythonw.exe"
+                if python_w.exists():
+                    return str(python_w)
+            return sys.executable
+
+        # If frozen, search PATH for python/pythonw
+        exec_names = ["pythonw", "python", "python3"] if prefer_w else ["python", "python3", "pythonw"]
+        if self.os_type == "windows":
+            exec_names = [e + ".exe" for e in exec_names]
+
+        for name in exec_names:
+            path = shutil.which(name)
+            if path:
+                return path
+                
+        # Hardcoded fallback path for common Windows python location
+        if self.os_type == "windows":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            if local_app_data:
+                packages_path = Path(local_app_data) / "Microsoft" / "WindowsApps"
+                for name in exec_names:
+                    p = packages_path / name
+                    if p.exists():
+                        return str(p)
+                        
+        return "pythonw" if prefer_w else "python"
+
     def install_dependencies(self):
         print("Installing required Python packages (pystray, Pillow)...")
         try:
-            # run pip install
-            subprocess.run([sys.executable, "-m", "pip", "install", "pystray", "Pillow"], check=True)
+            # run pip install using system python (not installer exe)
+            python_cmd = self.get_system_python(prefer_w=False)
+            subprocess.run([python_cmd, "-m", "pip", "install", "pystray", "Pillow"], check=True)
             print("Dependencies installed successfully.")
         except Exception as e:
             msg = f"Could not install dependencies automatically via pip: {e}."
@@ -79,14 +111,8 @@ class SyncInstaller:
     def setup_autostart(self):
         print("Configuring Autostart...")
         
-        # We want to run sync_gui.py with pythonw (no terminal) on Windows, or python with --headless/tray
-        python_executable = sys.executable
-        # Use pythonw on Windows to prevent terminal window
-        if self.os_type == "windows":
-            python_w = Path(python_executable).parent / "pythonw.exe"
-            if python_w.exists():
-                python_executable = str(python_w)
-
+        # We want to run sync_gui.py with pythonw (no terminal) on Windows
+        python_executable = self.get_system_python(prefer_w=True)
         cmd = f'"{python_executable}" "{self.target_script}"'
 
         try:
@@ -201,8 +227,7 @@ Comment=Backup and synchronization daemon for Antigravity
         print("Creating desktop and search menu shortcuts...")
         try:
             desktop = Path.home() / "Desktop"
-            python_w = Path(sys.executable).parent / "pythonw.exe"
-            exec_cmd = python_w if python_w.exists() else sys.executable
+            exec_cmd = self.get_system_python(prefer_w=True)
 
             if self.os_type == "windows":
                 # Resolve OneDrive/custom desktop path using registry
