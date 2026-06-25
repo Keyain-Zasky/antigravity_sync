@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 sync_config.json
 backup_data/
+build/
+dist/
+*.spec
