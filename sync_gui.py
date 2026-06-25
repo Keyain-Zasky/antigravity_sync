@@ -24,7 +24,8 @@ DEFAULT_CONFIG = {
     "cooldown_seconds": 30,
     "git_remote": "origin",
     "google_drive_path": "",
-    "exclude_patterns": ["oauth_creds.json", "installation_id", "tmp/", ".git/"]
+    "exclude_patterns": ["oauth_creds.json", "installation_id", "tmp/", ".git/"],
+    "sync_projects": True
 }
 
 class AntigravitySyncApp:
@@ -211,6 +212,136 @@ class AntigravitySyncApp:
                 except OSError as e:
                     self.log(f"Failed to copy file {item.name}: {e}")
 
+    def is_safe_project_path(self, path_str):
+        try:
+            p = Path(path_str).resolve()
+            home = Path.home().resolve()
+            if not p.exists():
+                return False
+            if p == home:
+                self.log(f"Skipping project path because it is the home directory: {path_str}")
+                return False
+            if p in home.parents or len(p.parts) <= 2:
+                self.log(f"Skipping project path because it is a system root or parent of home: {path_str}")
+                return False
+            return True
+        except Exception as e:
+            self.log(f"Error checking project path safety for {path_str}: {e}")
+            return False
+
+    def copy_project_tree(self, src, dst):
+        """Recursively copies project files while applying strict exclusions for build/env folders."""
+        if not src.exists():
+            return
+        dst.mkdir(parents=True, exist_ok=True)
+        
+        exclude_names = {
+            "node_modules", ".git", "venv", ".venv", "env", "build", 
+            "dist", "target", "__pycache__", ".vscode", ".idea", 
+            "backup_data", ".gemini"
+        }
+        
+        try:
+            for item in src.iterdir():
+                if item.name in exclude_names:
+                    continue
+                dst_item = dst / item.name
+                if item.is_dir():
+                    self.copy_project_tree(item, dst_item)
+                else:
+                    try:
+                        shutil.copy2(item, dst_item)
+                    except OSError:
+                        pass
+        except Exception as e:
+            self.log(f"Error copying project directory {src}: {e}")
+
+    def restore_project_tree(self, src, dst):
+        if not src.exists():
+            return
+        dst.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            for item in src.iterdir():
+                dst_item = dst / item.name
+                if item.is_dir():
+                    self.restore_project_tree(item, dst_item)
+                else:
+                    try:
+                        shutil.copy2(item, dst_item)
+                    except OSError:
+                        pass
+        except Exception as e:
+            self.log(f"Error restoring project directory {src}: {e}")
+
+    def backup_projects(self):
+        projects_file = self.gemini_path / "projects.json"
+        if not projects_file.exists():
+            self.log("projects.json not found, skipping projects backup.")
+            return
+        
+        try:
+            with open(projects_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            projects = data.get("projects", {})
+            if not projects:
+                self.log("No projects found in projects.json to backup.")
+                return
+            
+            projects_backup_dir = self.backup_dir / "projects"
+            projects_backup_dir.mkdir(exist_ok=True)
+            
+            for path_str, name in projects.items():
+                if not self.is_safe_project_path(path_str):
+                    continue
+                
+                src = Path(path_str)
+                dst = projects_backup_dir / name
+                self.log(f"Backing up project: {name} ({path_str})")
+                
+                if dst.exists():
+                    try:
+                        shutil.rmtree(dst)
+                    except Exception:
+                        pass
+                
+                self.copy_project_tree(src, dst)
+            self.log("Projects backup completed.")
+        except Exception as e:
+            self.log(f"Error backing up projects: {e}")
+
+    def restore_projects(self):
+        projects_file = self.gemini_path / "projects.json"
+        if not projects_file.exists():
+            self.log("projects.json not found, skipping projects restore.")
+            return
+        
+        try:
+            with open(projects_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            projects = data.get("projects", {})
+            if not projects:
+                self.log("No projects found in projects.json to restore.")
+                return
+            
+            projects_backup_dir = self.backup_dir / "projects"
+            if not projects_backup_dir.exists():
+                self.log("No projects backup folder found to restore.")
+                return
+            
+            for path_str, name in projects.items():
+                if not self.is_safe_project_path(path_str):
+                    continue
+                
+                src = projects_backup_dir / name
+                dst = Path(path_str)
+                if src.exists():
+                    self.log(f"Restoring project: {name} to {path_str}")
+                    self.restore_project_tree(src, dst)
+            self.log("Projects restore completed.")
+        except Exception as e:
+            self.log(f"Error restoring projects: {e}")
+
     def perform_backup_and_push(self):
         try:
             self.set_status("Syncing")
@@ -218,6 +349,10 @@ class AntigravitySyncApp:
             
             # Perform local copy to backup_data
             self.copy_filtered_tree(self.gemini_path, self.backup_dir)
+            
+            if self.config.get("sync_projects", True):
+                self.log("Backing up project workspace files...")
+                self.backup_projects()
             
             backend = self.config.get("sync_backend", "github")
             
@@ -334,6 +469,11 @@ class AntigravitySyncApp:
             if self.backup_dir.exists():
                 self.log("Merging restored files back into active .gemini directory...")
                 self.restore_filtered_tree(self.backup_dir, self.gemini_path)
+                
+                if self.config.get("sync_projects", True):
+                    self.log("Restoring project workspace files...")
+                    self.restore_projects()
+                    
                 self.log("Restore operation completed successfully. Active chats updated.")
                 self.set_status("Idle")
             else:
@@ -510,6 +650,23 @@ class AntigravitySyncApp:
         self.cooldown_entry = make_styled_entry(config_inner, str(self.config.get("cooldown_seconds", 30)), width=8)
         self.cooldown_entry.grid(row=3, column=1, sticky=tk.W, pady=6, padx=10)
         
+        # Sync Projects option
+        self.sync_projects_var = tk.BooleanVar(value=self.config.get("sync_projects", True))
+        self.sync_projects_cb = tk.Checkbutton(
+            config_inner, 
+            text="Sincronizza anche i file dei progetti", 
+            variable=self.sync_projects_var,
+            bg="#1a1a1e", 
+            fg="#a8a8b3", 
+            activebackground="#1a1a1e", 
+            activeforeground="#e1e1e6",
+            selectcolor="#121214",
+            font=("Segoe UI", 10),
+            bd=0,
+            highlightthickness=0
+        )
+        self.sync_projects_cb.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=6, padx=5)
+        
         # Action Buttons row
         btn_frame = tk.Frame(main_frame, bg="#121214")
         btn_frame.pack(fill=tk.X, pady=(0, 15))
@@ -563,6 +720,7 @@ class AntigravitySyncApp:
             messagebox.showerror("Error", "Cooldown must be an integer.")
             return
             
+        self.config["sync_projects"] = self.sync_projects_var.get()
         self.save_config()
         messagebox.showinfo("Success", "Settings saved successfully.")
 
