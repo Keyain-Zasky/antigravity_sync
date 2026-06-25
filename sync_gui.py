@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.0.6"
+CURRENT_VERSION = "v1.0.7"
 
 # Optional dependencies for system tray
 try:
@@ -458,10 +458,29 @@ class AntigravitySyncApp:
                     
                 zip_req = urllib.request.Request(zipball_url, headers={"User-Agent": "Antigravity-Sync-Updater"})
                 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_file:
-                    with urllib.request.urlopen(zip_req, context=context) as zip_res:
-                        tmp_file.write(zip_res.read())
-                    tmp_zip_path = Path(tmp_file.name)
+                # Download with chunking and retry support to prevent IncompleteRead exceptions
+                max_retries = 3
+                download_success = False
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_file:
+                            with urllib.request.urlopen(zip_req, context=context) as zip_res:
+                                while True:
+                                    chunk = zip_res.read(32768)
+                                    if not chunk:
+                                        break
+                                    tmp_file.write(chunk)
+                            tmp_zip_path = Path(tmp_file.name)
+                        download_success = True
+                        break
+                    except Exception as e:
+                        self.log(f"Download attempt {attempt} failed: {e}")
+                        if attempt < max_retries:
+                            time.sleep(2)
+                
+                if not download_success:
+                    self.log("Error: Failed to download the update package after multiple attempts.")
+                    return
                 
                 self.log("Update package downloaded. Installing...")
                 
