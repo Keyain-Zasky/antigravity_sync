@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.0.7"
+CURRENT_VERSION = "v1.0.8"
 
 # Optional dependencies for system tray
 try:
@@ -200,6 +200,59 @@ class AntigravitySyncApp:
             except Exception:
                 pass
 
+    def count_dir_files(self, path):
+        total = 0
+        if not path.exists():
+            return 0
+        try:
+            for root, dirs, files in os.walk(path):
+                total += len(files)
+        except Exception:
+            pass
+        return total
+
+    def count_files_to_sync(self):
+        total = 0
+        if self.gemini_path.exists():
+            try:
+                for root, dirs, files in os.walk(self.gemini_path):
+                    dirs[:] = [d for d in dirs if not any(exp in os.path.join(root, d) for exp in self.config["exclude_patterns"])]
+                    for file in files:
+                        file_path = Path(root) / file
+                        if not any(exp in str(file_path) for exp in self.config["exclude_patterns"]):
+                            total += 1
+            except Exception:
+                pass
+                        
+        if self.config.get("sync_projects", True):
+            projects_file = self.gemini_path / "projects.json"
+            if projects_file.exists():
+                try:
+                    with open(projects_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    projects = data.get("projects", {})
+                    exclude_names = {
+                        "node_modules", ".git", "venv", ".venv", "env", "build", 
+                        "dist", "target", "__pycache__", ".vscode", ".idea", 
+                        "backup_data", ".gemini"
+                    }
+                    for path_str, name in projects.items():
+                        if not self.is_safe_project_path(path_str):
+                            continue
+                        src = Path(path_str)
+                        if src.exists():
+                            for root, dirs, files in os.walk(src):
+                                dirs[:] = [d for d in dirs if d not in exclude_names]
+                                total += len(files)
+                except Exception:
+                    pass
+        return total
+
+    def update_sync_percentage(self, phase_name):
+        if hasattr(self, "total_files") and self.total_files > 0:
+            pct = min(100, int((self.copied_files / self.total_files) * 100))
+            self.set_status(f"Syncing {phase_name} ({pct}%)")
+
     def copy_filtered_tree(self, src, dst):
         """Recursively copies files while applying exclude_patterns."""
         if not src.exists():
@@ -220,6 +273,8 @@ class AntigravitySyncApp:
                     shutil.copy2(item, dst_item)
                 except OSError as e:
                     self.log(f"Failed to copy file {item.name}: {e}")
+                self.copied_files = getattr(self, "copied_files", 0) + 1
+                self.update_sync_percentage("Local")
 
     def is_safe_project_path(self, path_str):
         try:
@@ -262,6 +317,8 @@ class AntigravitySyncApp:
                         shutil.copy2(item, dst_item)
                     except OSError:
                         pass
+                    self.copied_files = getattr(self, "copied_files", 0) + 1
+                    self.update_sync_percentage("Local")
         except Exception as e:
             self.log(f"Error copying project directory {src}: {e}")
 
@@ -354,9 +411,12 @@ class AntigravitySyncApp:
     def perform_backup_and_push(self):
         try:
             self.set_status("Syncing")
-            self.log("Backing up local .gemini files...")
+            self.log("Counting files to synchronize...")
+            self.total_files = self.count_files_to_sync()
+            self.copied_files = 0
+            self.log(f"Total files to backup: {self.total_files}")
             
-            # Perform local copy to backup_data
+            self.log("Backing up local .gemini files...")
             self.copy_filtered_tree(self.gemini_path, self.backup_dir)
             
             if self.config.get("sync_projects", True):
@@ -371,6 +431,8 @@ class AntigravitySyncApp:
                 
             if backend in ("google-drive", "both"):
                 self.log("Running Google Drive sync...")
+                self.total_files = self.count_dir_files(self.backup_dir)
+                self.copied_files = 0
                 self.run_google_drive_sync(direction="backup")
                 
             self.last_sync_time = time.strftime("%H:%M:%S")
@@ -551,6 +613,8 @@ class AntigravitySyncApp:
                             shutil.copy2(item, dst_item)
                     except Exception:
                         pass
+                    self.copied_files = getattr(self, "copied_files", 0) + 1
+                    self.update_sync_percentage("GDrive")
         except Exception as e:
             self.log(f"Error reading source folder {src}: {e}")
             
@@ -713,6 +777,13 @@ class AntigravitySyncApp:
         main_frame = tk.Frame(self.root, bg="#121214", padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
+        # Footer version label packed first with tk.BOTTOM to ensure visibility
+        footer_frame = tk.Frame(main_frame, bg="#121214")
+        footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
+        
+        version_label = tk.Label(footer_frame, text=CURRENT_VERSION, bg="#121214", fg="#575760", font=("Segoe UI", 9))
+        version_label.pack(side=tk.RIGHT)
+        
         # Title header
         header_frame = tk.Frame(main_frame, bg="#121214")
         header_frame.pack(fill=tk.X, pady=(0, 15))
@@ -832,18 +903,22 @@ class AntigravitySyncApp:
         restore_btn = create_btn(btn_frame, "Force Restore Chats", lambda: threading.Thread(target=self.perform_restore).start(), is_primary=False)
         restore_btn.pack(side=tk.LEFT, padx=5)
         
-        # Log view Card
-        log_frame = make_card(main_frame, "Activity Console Logs")
-        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.logs_visible = True
+        self.toggle_logs_btn = create_btn(btn_frame, "Nascondi Logs", self.toggle_logs, is_primary=False)
+        self.toggle_logs_btn.pack(side=tk.LEFT, padx=5)
         
-        self.log_text = tk.Text(log_frame, height=8, state="disabled", wrap=tk.WORD, 
+        # Log view Card
+        self.log_frame = make_card(main_frame, "Activity Console Logs")
+        self.log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_text = tk.Text(self.log_frame, height=8, state="disabled", wrap=tk.WORD, 
                                 bg="#121214", fg="#a6accd", insertbackground="#ffffff",
                                 relief="flat", bd=0, highlightbackground="#29292e", highlightthickness=1,
                                 font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=5, pady=5)
         
         # Styled scrollbar
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scrollbar = ttk.Scrollbar(self.log_frame, command=self.log_text.yview)
         scrollbar.pack(fill=tk.Y, side=tk.RIGHT, pady=5, padx=(0, 5))
         self.log_text.config(yscrollcommand=scrollbar.set)
         
@@ -852,13 +927,6 @@ class AntigravitySyncApp:
         for log in self.log_messages:
             self.log_text.insert(tk.END, log + "\n")
         self.log_text.config(state="disabled")
-        
-        # Footer version label in bottom right
-        footer_frame = tk.Frame(main_frame, bg="#121214")
-        footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(5, 0))
-        
-        version_label = tk.Label(footer_frame, text=CURRENT_VERSION, bg="#121214", fg="#575760", font=("Segoe UI", 9))
-        version_label.pack(side=tk.RIGHT)
 
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -936,6 +1004,16 @@ class AntigravitySyncApp:
             except Exception:
                 pass
         sys.exit(0)
+
+    def toggle_logs(self):
+        if self.logs_visible:
+            self.log_frame.pack_forget()
+            self.toggle_logs_btn.config(text="Mostra Logs")
+            self.logs_visible = False
+        else:
+            self.log_frame.pack(fill=tk.BOTH, expand=True)
+            self.toggle_logs_btn.config(text="Nascondi Logs")
+            self.logs_visible = True
 
 if __name__ == "__main__":
     headless = "--headless" in sys.argv
