@@ -2,6 +2,7 @@ import os
 import sys
 import platform
 import subprocess
+import shutil
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -9,25 +10,56 @@ from tkinter import ttk, messagebox
 class SyncInstaller:
     def __init__(self, headless=False):
         self.headless = headless
-        self.script_dir = Path(__file__).resolve().parent
-        self.target_script = self.script_dir / "sync_gui.py"
         self.os_type = platform.system().lower()
+        
+        # Check if running in a PyInstaller bundle or as a script
+        if getattr(sys, 'frozen', False):
+            self.bundle_dir = Path(sys._MEIPASS)
+        else:
+            self.bundle_dir = Path(__file__).resolve().parent
+
+        # Define permanent installation directory
+        if self.os_type == "windows":
+            self.install_dir = Path(os.environ["LOCALAPPDATA"]) / "AntigravitySync"
+        elif self.os_type == "darwin":
+            self.install_dir = Path.home() / "Library" / "Application Support" / "AntigravitySync"
+        else:
+            self.install_dir = Path.home() / ".local" / "share" / "antigravity-sync"
+            
+        self.install_dir.mkdir(parents=True, exist_ok=True)
+        self.target_script = self.install_dir / "sync_gui.py"
         
         if not self.headless:
             self.setup_gui()
         else:
             self.run_install()
 
+    def copy_program_files(self):
+        print(f"Installing program files to {self.install_dir}...")
+        try:
+            # Copy sync_gui.py from bundle to permanent installation folder
+            shutil.copy2(self.bundle_dir / "sync_gui.py", self.install_dir / "sync_gui.py")
+            # Copy icon.png if it exists in bundle
+            icon_png = self.bundle_dir / "icon.png"
+            if icon_png.exists():
+                shutil.copy2(icon_png, self.install_dir / "icon.png")
+            print("Program files installed successfully.")
+        except Exception as e:
+            print(f"Failed to copy program files: {e}")
+
     def run_install(self):
         print(f"Detected OS: {self.os_type.capitalize()}")
         
-        # 1. Install Dependencies
+        # 1. Copy Files to Permanent Location
+        self.copy_program_files()
+        
+        # 2. Install Dependencies
         self.install_dependencies()
         
-        # 2. Configure Autostart
+        # 3. Configure Autostart
         self.setup_autostart()
         
-        # 3. Create desktop/start menu shortcuts
+        # 4. Create desktop/start menu shortcuts
         self.create_shortcuts()
         
         print("Installation completed successfully!")
@@ -184,8 +216,8 @@ Comment=Backup and synchronization daemon for Antigravity
                     pass
                 
                 # Convert PNG to ICO for Windows shortcuts natively
-                icon_png = self.script_dir / "icon.png"
-                icon_ico = self.script_dir / "icon.ico"
+                icon_png = self.install_dir / "icon.png"
+                icon_ico = self.install_dir / "icon.ico"
                 if icon_png.exists():
                     try:
                         from PIL import Image
@@ -199,13 +231,13 @@ Comment=Backup and synchronization daemon for Antigravity
 
                 # 1. Desktop LNK Shortcut (clean, no console window)
                 desktop_lnk = desktop / "Antigravity Sync.lnk"
-                self.create_windows_lnk(desktop_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir), icon_path_arg)
+                self.create_windows_lnk(desktop_lnk, exec_cmd, f'"{self.target_script}"', str(self.install_dir), icon_path_arg)
                 print(f"Windows desktop shortcut created: {desktop_lnk}")
 
                 # 2. Start Menu Shortcut (Makes it searchable in Windows Search Bar!)
                 start_menu_folder = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
                 start_menu_lnk = start_menu_folder / "Antigravity Sync.lnk"
-                self.create_windows_lnk(start_menu_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir), icon_path_arg)
+                self.create_windows_lnk(start_menu_lnk, exec_cmd, f'"{self.target_script}"', str(self.install_dir), icon_path_arg)
                 print(f"Windows Start Menu shortcut created (search indexed): {start_menu_lnk}")
                 
             elif self.os_type == "darwin": # macOS Spotlight search integration
@@ -294,7 +326,7 @@ Categories=Utility;Settings;
         desc = (
             f"This installer will configure Antigravity Sync on your system.\n\n"
             f"Detected Platform: {self.os_type.capitalize()}\n"
-            f"Installation Path: {self.script_dir}\n"
+            f"Installation Path: {self.install_dir}\n"
         )
         desc_label = ttk.Label(main_frame, text=desc, justify=tk.LEFT, font=("Segoe UI", 10))
         desc_label.pack(fill=tk.X, pady=(0, 20))
@@ -316,9 +348,12 @@ Categories=Utility;Settings;
 
     def gui_install(self):
         self.install_btn.config(state="disabled")
+        self.progress_var.set("Copying program files...")
+        self.root.update()
+        self.copy_program_files()
+        
         self.progress_var.set("Installing dependencies...")
         self.root.update()
-        
         self.install_dependencies()
         
         self.progress_var.set("Configuring autostart...")
