@@ -112,25 +112,52 @@ Comment=Backup and synchronization daemon for Antigravity
             print(f"Failed to setup autostart: {e}")
 
     def create_windows_lnk(self, shortcut_path, target_path, arguments="", working_dir=""):
-        """Helper to create a native Windows .lnk shortcut using a temporary VBScript."""
-        import tempfile
-        vbs_path = Path(tempfile.gettempdir()) / "create_lnk.vbs"
-        vbs_content = (
-            f'Set oWS = WScript.CreateObject("WScript.Shell")\n'
-            f'sLinkFile = "{shortcut_path}"\n'
-            f'Set oLink = oWS.CreateShortcut(sLinkFile)\n'
-            f'oLink.TargetPath = "{target_path}"\n'
-            f'oLink.Arguments = "{arguments}"\n'
-            f'oLink.WorkingDirectory = "{working_dir}"\n'
-            f'oLink.Save()\n'
+        """Helper to create a native Windows .lnk shortcut using PowerShell, falling back to VBScript or a BAT file."""
+        ps_command = (
+            f"$WshShell = New-Object -ComObject WScript.Shell; "
+            f"$Shortcut = $WshShell.CreateShortcut('{shortcut_path}'); "
+            f"$Shortcut.TargetPath = '{target_path}'; "
+            f"$Shortcut.Arguments = '{arguments}'; "
+            f"$Shortcut.WorkingDirectory = '{working_dir}'; "
+            f"$Shortcut.Save()"
         )
         try:
+            # Try via PowerShell first (highly reliable on modern Windows)
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_command], capture_output=True, text=True)
+            if res.returncode == 0:
+                return
+        except Exception:
+            pass
+
+        # Try via legacy VBScript as second choice
+        try:
+            import tempfile
+            vbs_path = Path(tempfile.gettempdir()) / "create_lnk.vbs"
+            vbs_content = (
+                f'Set oWS = WScript.CreateObject("WScript.Shell")\n'
+                f'sLinkFile = "{shortcut_path}"\n'
+                f'Set oLink = oWS.CreateShortcut(sLinkFile)\n'
+                f'oLink.TargetPath = "{target_path}"\n'
+                f'oLink.Arguments = "{arguments}"\n'
+                f'oLink.WorkingDirectory = "{working_dir}"\n'
+                f'oLink.Save()\n'
+            )
             with open(vbs_path, "w", encoding="utf-8") as f:
                 f.write(vbs_content)
             subprocess.run(["cscript", "/nologo", str(vbs_path)], capture_output=True)
             vbs_path.unlink()
+            return
+        except Exception:
+            pass
+
+        # Fallback to simple batch file if COM objects/PowerShell are completely blocked by Group Policy
+        try:
+            bat_path = Path(shortcut_path).with_suffix(".bat")
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write(f'@echo off\nstart "" "{target_path}" {arguments}\n')
+            print(f"Group Policy block detected. Fallback batch shortcut created: {bat_path}")
         except Exception as e:
-            print(f"Failed to create windows lnk file: {e}")
+            print(f"Failed to create windows shortcut: {e}")
 
     def create_shortcuts(self):
         print("Creating desktop and search menu shortcuts...")
