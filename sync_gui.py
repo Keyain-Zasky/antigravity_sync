@@ -400,11 +400,20 @@ class AntigravitySyncApp:
                   background=[("active", "#29292e"), ("pressed", "#8257e5")])
 
         # Load Window Icon
-        icon_path = self.script_dir / "icon.png"
-        if icon_path.exists():
+        icon_png = self.script_dir / "icon.png"
+        icon_ico = self.script_dir / "icon.ico"
+        if icon_png.exists():
             try:
-                self.icon_img = ImageTk.PhotoImage(Image.open(icon_path))
-                self.root.iconphoto(False, self.icon_img)
+                # Convert to ICO dynamically on Windows if missing
+                if platform.system().lower() == "windows" and not icon_ico.exists():
+                    img = Image.open(icon_png)
+                    img.save(icon_ico, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+                
+                if platform.system().lower() == "windows" and icon_ico.exists():
+                    self.root.iconbitmap(default=str(icon_ico))
+                else:
+                    self.icon_img = ImageTk.PhotoImage(Image.open(icon_png))
+                    self.root.iconphoto(False, self.icon_img)
             except Exception as e:
                 self.log(f"Error setting window icon: {e}")
 

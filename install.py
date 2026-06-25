@@ -111,7 +111,7 @@ Comment=Backup and synchronization daemon for Antigravity
         except Exception as e:
             print(f"Failed to setup autostart: {e}")
 
-    def create_windows_lnk(self, shortcut_path, target_path, arguments="", working_dir=""):
+    def create_windows_lnk(self, shortcut_path, target_path, arguments="", working_dir="", icon_path=""):
         """Helper to create a native Windows .lnk shortcut using PowerShell, falling back to VBScript or a BAT file."""
         ps_command = (
             f"$WshShell = New-Object -ComObject WScript.Shell; "
@@ -119,8 +119,11 @@ Comment=Backup and synchronization daemon for Antigravity
             f"$Shortcut.TargetPath = '{target_path}'; "
             f"$Shortcut.Arguments = '{arguments}'; "
             f"$Shortcut.WorkingDirectory = '{working_dir}'; "
-            f"$Shortcut.Save()"
         )
+        if icon_path:
+            ps_command += f"$Shortcut.IconLocation = '{icon_path}'; "
+        ps_command += "$Shortcut.Save()"
+
         try:
             # Try via PowerShell first (highly reliable on modern Windows)
             res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_command], capture_output=True, text=True)
@@ -140,8 +143,11 @@ Comment=Backup and synchronization daemon for Antigravity
                 f'oLink.TargetPath = "{target_path}"\n'
                 f'oLink.Arguments = "{arguments}"\n'
                 f'oLink.WorkingDirectory = "{working_dir}"\n'
-                f'oLink.Save()\n'
             )
+            if icon_path:
+                vbs_content += f'oLink.IconLocation = "{icon_path}"\n'
+            vbs_content += 'oLink.Save()\n'
+            
             with open(vbs_path, "w", encoding="utf-8") as f:
                 f.write(vbs_content)
             subprocess.run(["cscript", "/nologo", str(vbs_path)], capture_output=True)
@@ -177,15 +183,29 @@ Comment=Backup and synchronization daemon for Antigravity
                 except Exception:
                     pass
                 
+                # Convert PNG to ICO for Windows shortcuts natively
+                icon_png = self.script_dir / "icon.png"
+                icon_ico = self.script_dir / "icon.ico"
+                if icon_png.exists():
+                    try:
+                        from PIL import Image
+                        img = Image.open(icon_png)
+                        img.save(icon_ico, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+                        print("Converted icon.png to icon.ico for native shortcuts.")
+                    except Exception as e:
+                        print(f"Failed to convert PNG to ICO: {e}")
+                
+                icon_path_arg = str(icon_ico) if icon_ico.exists() else ""
+
                 # 1. Desktop LNK Shortcut (clean, no console window)
                 desktop_lnk = desktop / "Antigravity Sync.lnk"
-                self.create_windows_lnk(desktop_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir))
+                self.create_windows_lnk(desktop_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir), icon_path_arg)
                 print(f"Windows desktop shortcut created: {desktop_lnk}")
 
                 # 2. Start Menu Shortcut (Makes it searchable in Windows Search Bar!)
                 start_menu_folder = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
                 start_menu_lnk = start_menu_folder / "Antigravity Sync.lnk"
-                self.create_windows_lnk(start_menu_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir))
+                self.create_windows_lnk(start_menu_lnk, exec_cmd, f'"{self.target_script}"', str(self.script_dir), icon_path_arg)
                 print(f"Windows Start Menu shortcut created (search indexed): {start_menu_lnk}")
                 
             elif self.os_type == "darwin": # macOS Spotlight search integration
