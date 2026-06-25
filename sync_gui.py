@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.0.9"
+CURRENT_VERSION = "v1.1.0"
 
 # Optional dependencies for system tray
 try:
@@ -211,6 +211,48 @@ class AntigravitySyncApp:
             pass
         return total
 
+    def get_touched_files(self):
+        touched_files = set()
+        brain_dirs = [
+            self.gemini_path / "antigravity" / "brain",
+            self.gemini_path / "antigravity-ide" / "brain"
+        ]
+        
+        for brain_dir in brain_dirs:
+            if not brain_dir.exists():
+                continue
+            for conv_dir in brain_dir.iterdir():
+                if not conv_dir.is_dir():
+                    continue
+                
+                transcript_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+                if not transcript_path.exists():
+                    continue
+                    
+                try:
+                    with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            if not line.strip():
+                                continue
+                            try:
+                                step = json.loads(line)
+                                tool_calls = step.get("tool_calls", [])
+                                for tc in tool_calls:
+                                    name = tc.get("name")
+                                    args = tc.get("args", {})
+                                    if name in ("write_to_file", "replace_file_content", "multi_replace_file_content", "write_file", "edit_file"):
+                                        target = args.get("TargetFile") or args.get("AbsolutePath") or args.get("path")
+                                        if target:
+                                            target_clean = target.strip('"').strip("'")
+                                            p = Path(target_clean).resolve()
+                                            if p.exists() and p.is_file():
+                                                touched_files.add(p)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    self.log(f"Error reading transcript {transcript_path}: {e}")
+        return touched_files
+
     def count_files_to_sync(self):
         total = 0
         if self.gemini_path.exists():
@@ -231,19 +273,19 @@ class AntigravitySyncApp:
                     with open(projects_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     projects = data.get("projects", {})
-                    exclude_names = {
-                        "node_modules", ".git", "venv", ".venv", "env", "build", 
-                        "dist", "target", "__pycache__", ".vscode", ".idea", 
-                        "backup_data", ".gemini"
-                    }
-                    for path_str, name in projects.items():
-                        if not self.is_safe_project_path(path_str):
-                            continue
-                        src = Path(path_str)
-                        if src.exists():
-                            for root, dirs, files in os.walk(src):
-                                dirs[:] = [d for d in dirs if d not in exclude_names]
-                                total += len(files)
+                    if projects:
+                        touched = self.get_touched_files()
+                        for p_file in touched:
+                            for path_str in projects.keys():
+                                if not self.is_safe_project_path(path_str):
+                                    continue
+                                try:
+                                    proj_path = Path(path_str).resolve()
+                                    if proj_path in p_file.parents:
+                                        total += 1
+                                        break
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
         return total
@@ -302,53 +344,6 @@ class AntigravitySyncApp:
             self.log(f"Error checking project path safety for {path_str}: {e}")
             return False
 
-    def copy_project_tree(self, src, dst):
-        """Recursively copies project files while applying strict exclusions for build/env folders."""
-        if not src.exists():
-            return
-        dst.mkdir(parents=True, exist_ok=True)
-        
-        exclude_names = {
-            "node_modules", ".git", "venv", ".venv", "env", "build", 
-            "dist", "target", "__pycache__", ".vscode", ".idea", 
-            "backup_data", ".gemini"
-        }
-        
-        try:
-            for item in src.iterdir():
-                if item.name in exclude_names:
-                    continue
-                dst_item = dst / item.name
-                if item.is_dir():
-                    self.copy_project_tree(item, dst_item)
-                else:
-                    try:
-                        shutil.copy2(item, dst_item)
-                    except OSError:
-                        pass
-                    self.copied_files = getattr(self, "copied_files", 0) + 1
-                    self.update_sync_percentage("Local")
-        except Exception as e:
-            self.log(f"Error copying project directory {src}: {e}")
-
-    def restore_project_tree(self, src, dst):
-        if not src.exists():
-            return
-        dst.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            for item in src.iterdir():
-                dst_item = dst / item.name
-                if item.is_dir():
-                    self.restore_project_tree(item, dst_item)
-                else:
-                    try:
-                        shutil.copy2(item, dst_item)
-                    except OSError:
-                        pass
-        except Exception as e:
-            self.log(f"Error restoring project directory {src}: {e}")
-
     def backup_projects(self):
         projects_file = self.gemini_path / "projects.json"
         if not projects_file.exists():
@@ -366,22 +361,37 @@ class AntigravitySyncApp:
             projects_backup_dir = self.backup_dir / "projects"
             projects_backup_dir.mkdir(exist_ok=True)
             
+            self.log("Retrieving list of files touched by Antigravity from logs...")
+            touched_files = self.get_touched_files()
+            self.log(f"Found {len(touched_files)} files touched by Antigravity.")
+            
+            copied_count = 0
             for path_str, name in projects.items():
                 if not self.is_safe_project_path(path_str):
                     continue
                 
-                src = Path(path_str)
-                dst = projects_backup_dir / name
-                self.log(f"Backing up project: {name} ({path_str})")
-                
-                if dst.exists():
-                    try:
-                        shutil.rmtree(dst)
-                    except Exception:
-                        pass
-                
-                self.copy_project_tree(src, dst)
-            self.log("Projects backup completed.")
+                try:
+                    proj_path = Path(path_str).resolve()
+                    project_files = [f for f in touched_files if proj_path in f.parents]
+                    if not project_files:
+                        continue
+                    
+                    self.log(f"Backing up {len(project_files)} files for project: {name} ({path_str})")
+                    for f in project_files:
+                        rel_path = f.relative_to(proj_path)
+                        dst = projects_backup_dir / name / rel_path
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            shutil.copy2(f, dst)
+                            copied_count += 1
+                        except OSError as e:
+                            self.log(f"Error copying {f.name}: {e}")
+                        
+                        self.copied_files = getattr(self, "copied_files", 0) + 1
+                        self.update_sync_percentage("Local")
+                except Exception as e:
+                    self.log(f"Error backing up project {name}: {e}")
+            self.log(f"Backup of project files completed. Total copied files: {copied_count}")
         except Exception as e:
             self.log(f"Error backing up projects: {e}")
 
@@ -404,16 +414,31 @@ class AntigravitySyncApp:
                 self.log("No projects backup folder found to restore.")
                 return
             
+            restored_count = 0
+            name_to_path = {}
             for path_str, name in projects.items():
-                if not self.is_safe_project_path(path_str):
-                    continue
-                
-                src = projects_backup_dir / name
-                dst = Path(path_str)
-                if src.exists():
-                    self.log(f"Restoring project: {name} to {path_str}")
-                    self.restore_project_tree(src, dst)
-            self.log("Projects restore completed.")
+                if self.is_safe_project_path(path_str):
+                    name_to_path[name] = Path(path_str).resolve()
+            
+            for root, dirs, files in os.walk(projects_backup_dir):
+                for file in files:
+                    file_path = Path(root) / file
+                    try:
+                        rel_to_backup = file_path.relative_to(projects_backup_dir)
+                        project_name = rel_to_backup.parts[0]
+                        
+                        if project_name in name_to_path:
+                            dest_project_root = name_to_path[project_name]
+                            rel_file_path = Path(*rel_to_backup.parts[1:])
+                            dst = dest_project_root / rel_file_path
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            shutil.copy2(file_path, dst)
+                            restored_count += 1
+                    except Exception as e:
+                        self.log(f"Failed to restore file {file}: {e}")
+                        
+            self.log(f"Projects restore completed. Restored {restored_count} files.")
         except Exception as e:
             self.log(f"Error restoring projects: {e}")
 
