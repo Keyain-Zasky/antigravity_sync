@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.0.8"
+CURRENT_VERSION = "v1.0.9"
 
 # Optional dependencies for system tray
 try:
@@ -288,6 +288,15 @@ class AntigravitySyncApp:
             if p in home.parents or len(p.parts) <= 2:
                 self.log(f"Skipping project path because it is a system root or parent of home: {path_str}")
                 return False
+                
+            path_lower = str(p).lower()
+            unsafe_keywords = [
+                "appdata", "program files", "programdata", "windows", "system32"
+            ]
+            for kw in unsafe_keywords:
+                if kw in path_lower:
+                    self.log(f"Skipping project path because it matches unsafe/installation keywords: {path_str}")
+                    return False
             return True
         except Exception as e:
             self.log(f"Error checking project path safety for {path_str}: {e}")
