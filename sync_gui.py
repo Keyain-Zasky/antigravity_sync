@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.1.1"
+CURRENT_VERSION = "v1.1.2"
 
 # Optional dependencies for system tray
 try:
@@ -253,6 +253,53 @@ class AntigravitySyncApp:
                     self.log(f"Error reading transcript {transcript_path}: {e}")
         return touched_files
 
+    def get_active_projects(self):
+        active_projects = {}
+        projects_dir = self.gemini_path / "config" / "projects"
+        if not projects_dir.exists():
+            return active_projects
+        
+        try:
+            import urllib.parse
+            import re
+            for p_file in projects_dir.glob("*.json"):
+                try:
+                    with open(p_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    
+                    name = data.get("name", p_file.stem)
+                    slug = name.lower()
+                    slug = re.sub(r'[^a-z0-9]+', '-', slug).strip('-')
+                    if not slug:
+                        slug = p_file.stem
+                    
+                    resources = data.get("projectResources", {}).get("resources", [])
+                    for r in resources:
+                        for folder_key in ["gitFolder", "folder"]:
+                            folder_info = r.get(folder_key)
+                            if folder_info and "folderUri" in folder_info:
+                                uri = folder_info["folderUri"]
+                                decoded = urllib.parse.unquote(uri)
+                                if decoded.startswith("file:///"):
+                                    path_str = decoded[8:]
+                                elif decoded.startswith("file://"):
+                                    path_str = decoded[7:]
+                                else:
+                                    path_str = decoded
+                                
+                                path_str = path_str.replace("/", os.sep)
+                                try:
+                                    resolved_path = str(Path(path_str).resolve())
+                                    active_projects[resolved_path] = slug
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    self.log(f"Error reading active project file {p_file.name}: {e}")
+        except Exception as e:
+            self.log(f"Error reading active projects directory: {e}")
+            
+        return active_projects
+
     def count_files_to_sync(self):
         total = 0
         if self.gemini_path.exists():
@@ -267,27 +314,23 @@ class AntigravitySyncApp:
                 pass
                         
         if self.config.get("sync_projects", True):
-            projects_file = self.gemini_path / "projects.json"
-            if projects_file.exists():
-                try:
-                    with open(projects_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    projects = data.get("projects", {})
-                    if projects:
-                        touched = self.get_touched_files()
-                        for p_file in touched:
-                            for path_str in projects.keys():
-                                if not self.is_safe_project_path(path_str, log_skip=False):
-                                    continue
-                                try:
-                                    proj_path = Path(path_str).resolve()
-                                    if proj_path in p_file.parents:
-                                        total += 1
-                                        break
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
+            try:
+                projects = self.get_active_projects()
+                if projects:
+                    touched = self.get_touched_files()
+                    for p_file in touched:
+                        for path_str in projects.keys():
+                            if not self.is_safe_project_path(path_str, log_skip=False):
+                                continue
+                            try:
+                                proj_path = Path(path_str).resolve()
+                                if proj_path in p_file.parents:
+                                    total += 1
+                                    break
+                            except Exception:
+                                pass
+            except Exception:
+                pass
         return total
 
     def update_sync_percentage(self, phase_name):
@@ -348,17 +391,10 @@ class AntigravitySyncApp:
             return False
 
     def backup_projects(self):
-        projects_file = self.gemini_path / "projects.json"
-        if not projects_file.exists():
-            self.log("projects.json not found, skipping projects backup.")
-            return
-        
         try:
-            with open(projects_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            projects = data.get("projects", {})
+            projects = self.get_active_projects()
             if not projects:
-                self.log("No projects found in projects.json to backup.")
+                self.log("No active projects found to backup.")
                 return
             
             projects_backup_dir = self.backup_dir / "projects"
@@ -399,17 +435,10 @@ class AntigravitySyncApp:
             self.log(f"Error backing up projects: {e}")
 
     def restore_projects(self):
-        projects_file = self.gemini_path / "projects.json"
-        if not projects_file.exists():
-            self.log("projects.json not found, skipping projects restore.")
-            return
-        
         try:
-            with open(projects_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            projects = data.get("projects", {})
+            projects = self.get_active_projects()
             if not projects:
-                self.log("No projects found in projects.json to restore.")
+                self.log("No active projects found to restore.")
                 return
             
             projects_backup_dir = self.backup_dir / "projects"
