@@ -17,7 +17,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.1.3"
+CURRENT_VERSION = "v1.1.4"
 
 # Optional dependencies for system tray
 try:
@@ -27,7 +27,7 @@ try:
 except ImportError:
     TRAY_AVAILABLE = False
 
-# Default Config (Including SQLite database sidecar files)
+# Default Config (Including SQLite database sidecar files and temporary execution/service dirs)
 DEFAULT_CONFIG = {
     "sync_backend": "github",
     "cooldown_seconds": 30,
@@ -35,7 +35,8 @@ DEFAULT_CONFIG = {
     "google_drive_path": "",
     "exclude_patterns": [
         "oauth_creds.json", "installation_id", "tmp/", ".git/",
-        "-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal"
+        "-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal",
+        "bin/", "sidecars/"
     ],
     "sync_projects": True
 }
@@ -145,9 +146,13 @@ class AntigravitySyncApp:
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in self.config:
                         self.config[k] = v
-                # Ensure SQLite sidecars are in exclude_patterns
+                # Ensure SQLite sidecars, bin/, and sidecars/ are in exclude_patterns
                 if "exclude_patterns" in self.config:
-                    for pat in ["-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal"]:
+                    required_patterns = [
+                        "-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal",
+                        "bin/", "sidecars/"
+                    ]
+                    for pat in required_patterns:
                         if pat not in self.config["exclude_patterns"]:
                             self.config["exclude_patterns"].append(pat)
             except Exception as e:
