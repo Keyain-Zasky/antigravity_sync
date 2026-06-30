@@ -7,14 +7,17 @@ import platform
 import subprocess
 import threading
 import urllib.request
+import urllib.parse
 import zipfile
 import tempfile
 import ssl
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-CURRENT_VERSION = "v1.1.2"
+CURRENT_VERSION = "v1.1.3"
 
 # Optional dependencies for system tray
 try:
@@ -24,19 +27,32 @@ try:
 except ImportError:
     TRAY_AVAILABLE = False
 
-# Default Config
+# Default Config (Including SQLite database sidecar files)
 DEFAULT_CONFIG = {
     "sync_backend": "github",
     "cooldown_seconds": 30,
     "git_remote": "origin",
     "google_drive_path": "",
-    "exclude_patterns": ["oauth_creds.json", "installation_id", "tmp/", ".git/"],
+    "exclude_patterns": [
+        "oauth_creds.json", "installation_id", "tmp/", ".git/",
+        "-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal"
+    ],
     "sync_projects": True
 }
 
 class AntigravitySyncApp:
     def __init__(self, headless=False):
         self.headless = headless
+        
+        # Thread lock for safely updating stats/logs from concurrent copy threads
+        self._lock = threading.Lock()
+        self._touched_files_cache = None
+        
+        # Single instance check
+        self.port = 59721
+        if not self.check_single_instance():
+            sys.exit(0)
+
         self.script_dir = Path(__file__).resolve().parent
         self.config_path = self.script_dir / "sync_config.json"
         self.backup_dir = self.script_dir / "backup_data"
@@ -82,6 +98,36 @@ class AntigravitySyncApp:
             except KeyboardInterrupt:
                 self.log("Shutting down sync daemon...")
 
+    def check_single_instance(self):
+        try:
+            self.instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.instance_socket.bind(('127.0.0.1', self.port))
+            self.instance_socket.listen(5)
+            threading.Thread(target=self.listen_for_instance_commands, daemon=True).start()
+            return True
+        except socket.error:
+            # Another instance is running, try to send a SHOW command to it
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(('127.0.0.1', self.port))
+                s.sendall(b"SHOW")
+                s.close()
+            except Exception:
+                pass
+            return False
+
+    def listen_for_instance_commands(self):
+        while True:
+            try:
+                conn, addr = self.instance_socket.accept()
+                data = conn.recv(1024)
+                if data == b"SHOW":
+                    if not self.headless and hasattr(self, "root"):
+                        self.root.after(0, self.show_gui_from_tray)
+                conn.close()
+            except Exception:
+                break
+
     def detect_gemini_path(self):
         home = Path.home()
         self.gemini_path = home / ".gemini"
@@ -99,6 +145,11 @@ class AntigravitySyncApp:
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in self.config:
                         self.config[k] = v
+                # Ensure SQLite sidecars are in exclude_patterns
+                if "exclude_patterns" in self.config:
+                    for pat in ["-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal"]:
+                        if pat not in self.config["exclude_patterns"]:
+                            self.config["exclude_patterns"].append(pat)
             except Exception as e:
                 self.log(f"Error loading config: {e}. Using defaults.")
                 self.config = DEFAULT_CONFIG.copy()
@@ -140,13 +191,13 @@ class AntigravitySyncApp:
         max_time = 0.0
         try:
             for root, dirs, files in os.walk(self.gemini_path):
-                # Filter out excluded directories
-                dirs[:] = [d for d in dirs if not any(exp in os.path.join(root, d) for exp in self.config["exclude_patterns"])]
+                # Filter out excluded directories with normalized forward slashes
+                dirs[:] = [d for d in dirs if not any(exp in os.path.join(root, d).replace("\\", "/") for exp in self.config["exclude_patterns"])]
                 
                 for file in files:
                     file_path = Path(root) / file
-                    # Skip excluded files
-                    if any(exp in str(file_path) for exp in self.config["exclude_patterns"]):
+                    # Skip excluded files with normalized forward slashes
+                    if any(exp in str(file_path).replace("\\", "/") for exp in self.config["exclude_patterns"]):
                         continue
                     try:
                         mtime = file_path.stat().st_mtime
@@ -211,7 +262,10 @@ class AntigravitySyncApp:
             pass
         return total
 
-    def get_touched_files(self):
+    def get_touched_files(self, force_refresh=False):
+        if not force_refresh and hasattr(self, "_touched_files_cache") and self._touched_files_cache is not None:
+            return self._touched_files_cache
+
         touched_files = set()
         brain_dirs = [
             self.gemini_path / "antigravity" / "brain",
@@ -251,6 +305,8 @@ class AntigravitySyncApp:
                                 pass
                 except Exception as e:
                     self.log(f"Error reading transcript {transcript_path}: {e}")
+                    
+        self._touched_files_cache = touched_files
         return touched_files
 
     def get_active_projects(self):
@@ -261,6 +317,7 @@ class AntigravitySyncApp:
         
         try:
             import urllib.parse
+            import urllib.request
             import re
             for p_file in projects_dir.glob("*.json"):
                 try:
@@ -279,20 +336,13 @@ class AntigravitySyncApp:
                             folder_info = r.get(folder_key)
                             if folder_info and "folderUri" in folder_info:
                                 uri = folder_info["folderUri"]
-                                decoded = urllib.parse.unquote(uri)
-                                if decoded.startswith("file:///"):
-                                    path_str = decoded[8:]
-                                elif decoded.startswith("file://"):
-                                    path_str = decoded[7:]
-                                else:
-                                    path_str = decoded
-                                
-                                path_str = path_str.replace("/", os.sep)
                                 try:
+                                    parsed_uri = urllib.parse.urlparse(uri)
+                                    path_str = urllib.request.url2pathname(urllib.parse.unquote(parsed_uri.path))
                                     resolved_path = str(Path(path_str).resolve())
                                     active_projects[resolved_path] = slug
-                                except Exception:
-                                    pass
+                                except Exception as ex:
+                                    self.log(f"Error decoding project URI {uri}: {ex}")
                 except Exception as e:
                     self.log(f"Error reading active project file {p_file.name}: {e}")
         except Exception as e:
@@ -305,10 +355,10 @@ class AntigravitySyncApp:
         if self.gemini_path.exists():
             try:
                 for root, dirs, files in os.walk(self.gemini_path):
-                    dirs[:] = [d for d in dirs if not any(exp in os.path.join(root, d) for exp in self.config["exclude_patterns"])]
+                    dirs[:] = [d for d in dirs if not any(exp in os.path.join(root, d).replace("\\", "/") for exp in self.config["exclude_patterns"])]
                     for file in files:
                         file_path = Path(root) / file
-                        if not any(exp in str(file_path) for exp in self.config["exclude_patterns"]):
+                        if not any(exp in str(file_path).replace("\\", "/") for exp in self.config["exclude_patterns"]):
                             total += 1
             except Exception:
                 pass
@@ -338,28 +388,82 @@ class AntigravitySyncApp:
             pct = min(100, int((self.copied_files / self.total_files) * 100))
             self.set_status(f"Syncing {phase_name} ({pct}%)")
 
+    def copy_file_task(self, src_file, dst_file, phase_name):
+        try:
+            # Check if dst exists, and if size and mtime match, skip copying
+            try:
+                if dst_file.exists():
+                    s_stat = src_file.stat()
+                    d_stat = dst_file.stat()
+                    if s_stat.st_size == d_stat.st_size and abs(s_stat.st_mtime - d_stat.st_mtime) < 1.0:
+                        with self._lock:
+                            self.copied_files += 1
+                            self.update_sync_percentage(phase_name)
+                        return True
+            except Exception:
+                pass
+
+            # Perform copying
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            with self._lock:
+                self.copied_files += 1
+                self.update_sync_percentage(phase_name)
+            return True
+        except Exception as e:
+            self.log(f"Error copying {src_file} to {dst_file}: {e}")
+            return False
+
+    def restore_file_task(self, src_file, dst_file):
+        try:
+            if src_file.name in ("oauth_creds.json", "installation_id"):
+                return True
+                
+            try:
+                if dst_file.exists():
+                    s_stat = src_file.stat()
+                    d_stat = dst_file.stat()
+                    if s_stat.st_size == d_stat.st_size and abs(s_stat.st_mtime - d_stat.st_mtime) < 1.0:
+                        return True
+            except Exception:
+                pass
+                
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            return True
+        except Exception as e:
+            self.log(f"Failed to restore file {src_file.name}: {e}")
+            return False
+
     def copy_filtered_tree(self, src, dst):
-        """Recursively copies files while applying exclude_patterns."""
+        """Recursively scans and incrementally copies files in parallel while applying exclude_patterns."""
         if not src.exists():
             return
-        dst.mkdir(parents=True, exist_ok=True)
-        
-        for item in src.iterdir():
-            # Check exclusions
-            relative_path = item.relative_to(self.gemini_path)
-            if any(exp in str(relative_path).replace("\\", "/") for exp in self.config["exclude_patterns"]):
-                continue
             
-            dst_item = dst / item.name
-            if item.is_dir():
-                self.copy_filtered_tree(item, dst_item)
-            else:
-                try:
-                    shutil.copy2(item, dst_item)
-                except OSError as e:
-                    self.log(f"Failed to copy file {item.name}: {e}")
-                self.copied_files = getattr(self, "copied_files", 0) + 1
-                self.update_sync_percentage("Local")
+        tasks = []
+        
+        def collect_tasks(s_dir, d_dir):
+            if not s_dir.exists():
+                return
+            for item in s_dir.iterdir():
+                relative_path = item.relative_to(self.gemini_path)
+                if any(exp in str(relative_path).replace("\\", "/") for exp in self.config["exclude_patterns"]):
+                    continue
+                
+                dst_item = d_dir / item.name
+                if item.is_dir():
+                    collect_tasks(item, dst_item)
+                else:
+                    tasks.append((item, dst_item))
+                    
+        collect_tasks(src, dst)
+        
+        if tasks:
+            max_workers = min(16, len(tasks))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(self.copy_file_task, s, d, "Local") for s, d in tasks]
+                for f in futures:
+                    f.result()
 
     def is_safe_project_path(self, path_str, log_skip=True):
         try:
@@ -404,7 +508,7 @@ class AntigravitySyncApp:
             touched_files = self.get_touched_files()
             self.log(f"Found {len(touched_files)} files touched by Antigravity.")
             
-            copied_count = 0
+            tasks = []
             for path_str, name in projects.items():
                 if not self.is_safe_project_path(path_str):
                     continue
@@ -415,22 +519,22 @@ class AntigravitySyncApp:
                     if not project_files:
                         continue
                     
-                    self.log(f"Backing up {len(project_files)} files for project: {name} ({path_str})")
+                    self.log(f"Preparing backup of {len(project_files)} files for project: {name} ({path_str})")
                     for f in project_files:
                         rel_path = f.relative_to(proj_path)
                         dst = projects_backup_dir / name / rel_path
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            shutil.copy2(f, dst)
-                            copied_count += 1
-                        except OSError as e:
-                            self.log(f"Error copying {f.name}: {e}")
-                        
-                        self.copied_files = getattr(self, "copied_files", 0) + 1
-                        self.update_sync_percentage("Local")
+                        tasks.append((f, dst))
                 except Exception as e:
-                    self.log(f"Error backing up project {name}: {e}")
-            self.log(f"Backup of project files completed. Total copied files: {copied_count}")
+                    self.log(f"Error preparing project {name}: {e}")
+                    
+            if tasks:
+                max_workers = min(16, len(tasks))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(self.copy_file_task, s, d, "Local") for s, d in tasks]
+                    for f in futures:
+                        f.result()
+                        
+            self.log(f"Backup of project files completed. Checked/copied {len(tasks)} files.")
         except Exception as e:
             self.log(f"Error backing up projects: {e}")
 
@@ -446,12 +550,12 @@ class AntigravitySyncApp:
                 self.log("No projects backup folder found to restore.")
                 return
             
-            restored_count = 0
             name_to_path = {}
             for path_str, name in projects.items():
                 if self.is_safe_project_path(path_str):
                     name_to_path[name] = Path(path_str).resolve()
             
+            tasks = []
             for root, dirs, files in os.walk(projects_backup_dir):
                 for file in files:
                     file_path = Path(root) / file
@@ -463,19 +567,24 @@ class AntigravitySyncApp:
                             dest_project_root = name_to_path[project_name]
                             rel_file_path = Path(*rel_to_backup.parts[1:])
                             dst = dest_project_root / rel_file_path
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            
-                            shutil.copy2(file_path, dst)
-                            restored_count += 1
+                            tasks.append((file_path, dst))
                     except Exception as e:
-                        self.log(f"Failed to restore file {file}: {e}")
+                        self.log(f"Failed to prepare restore for file {file}: {e}")
                         
-            self.log(f"Projects restore completed. Restored {restored_count} files.")
+            if tasks:
+                max_workers = min(16, len(tasks))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(self.restore_file_task, s, d) for s, d in tasks]
+                    for f in futures:
+                        f.result()
+                        
+            self.log(f"Projects restore completed. Checked/restored {len(tasks)} files.")
         except Exception as e:
             self.log(f"Error restoring projects: {e}")
 
     def perform_backup_and_push(self):
         try:
+            self._touched_files_cache = None  # Reset touched files cache at start of sync
             self.set_status("Syncing")
             self.log("Counting files to synchronize...")
             self.total_files = self.count_files_to_sync()
@@ -511,6 +620,8 @@ class AntigravitySyncApp:
         except Exception as e:
             self.set_status("Error")
             self.log(f"Sync failed: {e}")
+        finally:
+            self._touched_files_cache = None  # Clear cache to free memory
 
     def run_git_push(self):
         try:
@@ -539,7 +650,10 @@ class AntigravitySyncApp:
             branch_proc = subprocess.run(["git", "branch", "--show-current"], cwd=self.script_dir, check=True, capture_output=True, text=True)
             branch = branch_proc.stdout.strip() or "main"
             
-            push_res = subprocess.run(["git", "push", remote, branch], cwd=self.script_dir, capture_output=True, text=True)
+            # Inject GIT_TERMINAL_PROMPT=0 to prevent hanging on authentication prompts
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            push_res = subprocess.run(["git", "push", remote, branch], cwd=self.script_dir, capture_output=True, text=True, env=env)
             if push_res.returncode != 0:
                 self.log(f"Git push failed. Ensure remote is configured: {push_res.stderr.strip()}")
             else:
@@ -660,43 +774,64 @@ class AntigravitySyncApp:
         except Exception as e:
             self.log(f"Update check failed: {e}")
 
+    def copy_incremental_task(self, src_item, dst_item):
+        try:
+            if not dst_item.exists() or src_item.stat().st_mtime != dst_item.stat().st_mtime or src_item.stat().st_size != dst_item.stat().st_size:
+                dst_item.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_item, dst_item)
+            with self._lock:
+                self.copied_files += 1
+                self.update_sync_percentage("GDrive")
+            return True
+        except Exception:
+            return False
+
     def copy_incremental(self, src, dst):
-        """Copies files incrementally from src to dst. Overwrites only if newer/different. Does not block on locks."""
+        """Copies files incrementally from src to dst using parallel threads. Overwrites only if newer/different. Does not block on locks."""
         if not src.exists():
             return
-        dst.mkdir(parents=True, exist_ok=True)
-        
-        src_names = set()
-        try:
-            for item in src.iterdir():
-                src_names.add(item.name)
-                dst_item = dst / item.name
-                if item.is_dir():
-                    self.copy_incremental(item, dst_item)
-                else:
-                    try:
-                        if not dst_item.exists() or item.stat().st_mtime != dst_item.stat().st_mtime or item.stat().st_size != dst_item.stat().st_size:
-                            shutil.copy2(item, dst_item)
-                    except Exception:
-                        pass
-                    self.copied_files = getattr(self, "copied_files", 0) + 1
-                    self.update_sync_percentage("GDrive")
-        except Exception as e:
-            self.log(f"Error reading source folder {src}: {e}")
             
-        try:
-            if dst.exists():
-                for item in dst.iterdir():
-                    if item.name not in src_names:
-                        try:
-                            if item.is_dir():
-                                shutil.rmtree(item)
-                            else:
-                                item.unlink()
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        tasks = []
+        
+        def collect_incremental_tasks(s_dir, d_dir):
+            if not s_dir.exists():
+                return
+            d_dir.mkdir(parents=True, exist_ok=True)
+            
+            src_names = set()
+            try:
+                for item in s_dir.iterdir():
+                    src_names.add(item.name)
+                    dst_item = d_dir / item.name
+                    if item.is_dir():
+                        collect_incremental_tasks(item, dst_item)
+                    else:
+                        tasks.append((item, dst_item))
+            except Exception as e:
+                self.log(f"Error scanning folder {s_dir}: {e}")
+                
+            try:
+                if d_dir.exists():
+                    for item in d_dir.iterdir():
+                        if item.name not in src_names:
+                            try:
+                                if item.is_dir():
+                                    shutil.rmtree(item)
+                                else:
+                                    item.unlink()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+                
+        collect_incremental_tasks(src, dst)
+        
+        if tasks:
+            max_workers = min(16, len(tasks))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(self.copy_incremental_task, s, d) for s, d in tasks]
+                for f in futures:
+                    f.result()
 
     def run_google_drive_sync(self, direction="backup"):
         gdrive_path_str = self.config.get("google_drive_path", "")
@@ -738,7 +873,10 @@ class AntigravitySyncApp:
             if backend in ("github", "both"):
                 self.log("Pulling latest files from Git...")
                 if (self.script_dir / ".git").exists():
-                    res = subprocess.run(["git", "pull"], cwd=self.script_dir, capture_output=True, text=True)
+                    # Inject GIT_TERMINAL_PROMPT=0 to prevent hanging on authentication prompts
+                    env = os.environ.copy()
+                    env["GIT_TERMINAL_PROMPT"] = "0"
+                    res = subprocess.run(["git", "pull"], cwd=self.script_dir, capture_output=True, text=True, env=env)
                     self.log(res.stdout.strip() or "Git pull completed.")
                 else:
                     self.log("Git repo not initialized in workspace. Cannot pull.")
